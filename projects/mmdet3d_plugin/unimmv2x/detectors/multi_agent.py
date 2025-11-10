@@ -1,0 +1,67 @@
+import torch
+from mmdet3d.models.detectors.mvx_two_stage import MVXTwoStageDetector
+
+class MultiAgent(MVXTwoStageDetector):
+    def __init__(self, model_ego_agent, model_other_agents={}):
+        super(MultiAgent, self).__init__()
+        self.model_ego_agent = model_ego_agent
+
+        self.other_agent_names = []
+        self.pc_range_dict = {}
+        for name_other_agent, model_other_agent in model_other_agents.items():
+            setattr(self, name_other_agent, model_other_agent)
+            self.other_agent_names.append(name_other_agent)
+            if hasattr(model_other_agent, 'pc_range'):
+                self.pc_range_dict[name_other_agent] = model_other_agent.pc_range
+
+
+    def forward(self, ego_agent_data=None, other_agent_data_dict={}, return_loss=True, w_label=True, **kwargs):
+        if return_loss:
+            return self.forward_train(ego_agent_data=ego_agent_data,
+                                                                other_agent_data_dict=other_agent_data_dict,
+                                                                return_loss=return_loss,
+                                                                **kwargs)
+        else:
+            return self.forward_test(ego_agent_data=ego_agent_data,
+                                                                other_agent_data_dict=other_agent_data_dict,
+                                                                return_loss=return_loss,
+                                                                w_label=w_label,
+                                                                **kwargs)
+
+    def forward_train(self, ego_agent_data=None, other_agent_data_dict={}, return_loss=True, **kwargs):
+        kwargs.pop('img_metas')
+
+        with torch.no_grad():
+            other_agent_results = {}
+            for name_other_agent in self.other_agent_names:
+                loss, unimmv2x_outs = getattr(self, name_other_agent)(
+                        return_loss=return_loss,
+                        **(other_agent_data_dict[name_other_agent]),
+                        **kwargs
+                )
+                unimmv2x_outs['ego2other_rt'] = other_agent_data_dict[name_other_agent]['veh2inf_rt']
+                unimmv2x_outs['pc_range'] = self.pc_range_dict[name_other_agent]
+                other_agent_results[name_other_agent] = unimmv2x_outs
+
+        loss, unimmv2x_outs = self.model_ego_agent(return_loss=return_loss, other_agent_results=other_agent_results, **ego_agent_data, **kwargs)
+
+        return loss
+
+    def forward_test(self, ego_agent_data=None, other_agent_data_dict={}, w_label=True, return_loss=False, **kwargs):
+        other_agent_results = {}
+        if kwargs.get('img_metas') is not None:
+            kwargs.pop('img_metas')
+        for name_other_agent in self.other_agent_names:
+            other_agent_result = getattr(self, name_other_agent)(
+                    return_loss=return_loss,
+                    w_label=w_label,
+                    **(other_agent_data_dict[name_other_agent]),
+                    **kwargs
+            )
+            other_agent_result[0]['ego2other_rt'] = other_agent_data_dict[name_other_agent]['veh2inf_rt']
+            other_agent_result[0]['pc_range'] = self.pc_range_dict[name_other_agent]
+            other_agent_results[name_other_agent] = other_agent_result
+
+        result = self.model_ego_agent(return_loss=return_loss, w_label=w_label, other_agent_results=other_agent_results, **ego_agent_data, **kwargs)
+
+        return result
